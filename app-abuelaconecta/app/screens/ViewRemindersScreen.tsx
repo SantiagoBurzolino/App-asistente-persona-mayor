@@ -1,0 +1,155 @@
+import { useFocusEffect, useRouter } from "expo-router";
+import React, { useCallback, useState } from "react";
+import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View, RefreshControl } from "react-native";
+
+interface Reminder {
+  id: string;
+  text: string;
+  hour: number;
+  minute: number;
+}
+
+const SERVER_URL = "http://10.56.2.27:5000"; // ← TU SERVER REAL
+
+export default function ViewRemindersScreen() {
+  const router = useRouter();
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const loadReminders = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      const res = await fetch(`${SERVER_URL}/reminders`);
+      const data = await res.json();
+
+      const sorted = data.sort(
+        (a: Reminder, b: Reminder) => a.hour * 60 + a.minute - (b.hour * 60 + b.minute)
+      );
+
+      setReminders(sorted);
+    } catch (e) {
+      console.error(e);
+      Alert.alert("Error", "No se pudieron cargar los recordatorios del servidor.");
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadReminders();
+    }, [loadReminders])
+  );
+
+  const handleDelete = async (id: string) => {
+    Alert.alert("Eliminar", "¿Eliminar este recordatorio?", [
+      { text: "Cancelar", style: "cancel" },
+      {
+        text: "Eliminar",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            const res = await fetch(`${SERVER_URL}/delete-reminder`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id }),
+            });
+
+            if (!res.ok) throw new Error("Error al eliminar");
+
+            setReminders((prev) => prev.filter((r) => r.id !== id));
+          } catch (e) {
+            console.error(e);
+            Alert.alert("Error", "No se pudo eliminar en el servidor.");
+          }
+        },
+      },
+    ]);
+  };
+
+  return (
+    <View style={styles.container}>
+      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <Text style={styles.backButtonText}>← atrás</Text>
+      </TouchableOpacity>
+
+      <Text style={styles.title}>Recordatorios Activos</Text>
+
+      <ScrollView
+        style={styles.remindersContainer}
+        refreshControl={
+          <RefreshControl
+            refreshing={isRefreshing}
+            onRefresh={loadReminders}
+            tintColor="#fff"
+          />
+        }
+      >
+        {reminders.length > 0 ? (
+          reminders.map((r) => (
+            <View key={r.id} style={styles.item}>
+              <Text style={styles.time}>
+                {`${r.hour.toString().padStart(2, "0")}:${r.minute
+                  .toString()
+                  .padStart(2, "0")}`}
+              </Text>
+
+              <Text style={styles.text}>{r.text}</Text>
+
+              <TouchableOpacity
+                style={styles.deleteButton}
+                onPress={() => handleDelete(r.id)}
+              >
+                <Text style={styles.deleteButtonText}>X</Text>
+              </TouchableOpacity>
+            </View>
+          ))
+        ) : (
+          <Text style={styles.empty}>No hay recordatorios</Text>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "#1033a3", padding: 24 },
+  backButton: {
+    backgroundColor: "#000",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 4,
+    alignSelf: "flex-start",
+    marginBottom: 24,
+  },
+  backButtonText: { color: "#fff", fontSize: 14 },
+  title: {
+    fontSize: 32,
+    color: "#fff",
+    fontWeight: "bold",
+    textAlign: "center",
+    marginBottom: 20,
+  },
+  remindersContainer: { flex: 1 },
+  item: {
+    flexDirection: "row",
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    alignItems: "center",
+  },
+  time: { fontSize: 24, fontWeight: "bold", color: "#1033a3", width: 70 },
+  text: { flex: 1, fontSize: 18, color: "#333" },
+  deleteButton: {
+    marginLeft: 15,
+    backgroundColor: "#ff3d3d",
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  deleteButtonText: { color: "#fff", fontWeight: "bold", fontSize: 16 },
+  empty: { color: "#ccc", fontSize: 20, textAlign: "center", marginTop: 50 },
+});
