@@ -29,8 +29,8 @@ async function cargarNotificaciones() {
 // CONFIGURACIÓN MQTT
 // ============================================================
 
-const BROKER = '10.56.2.27';
-const PORT_WS = 9001;
+const BROKER = '10.56.31.31';
+const PORT_WS = 1095;
 
 const TOPIC_MENSAJE = 'abuela/mensaje';
 const TOPIC_CONFIRMACION = 'abuela/confirmacion';
