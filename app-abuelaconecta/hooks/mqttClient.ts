@@ -26,7 +26,7 @@ async function cargarNotificaciones() {
 }
 
 // ============================================================
-// CONFIGURACIÓN MQTT
+// CONFIGURACIÓN MQTTs
 // ============================================================
 
 const BROKER = '10.56.31.31';
