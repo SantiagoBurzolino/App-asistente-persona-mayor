@@ -22,8 +22,8 @@ Notifications.setNotificationChannelAsync('mqtt-alerts', {
 });
 
 // --- Configuración MQTT ---
-const BROKER = '10.56.2.27';
-const PORT_WS = 9001; // Puerto para WebSockets
+const BROKER = '10.56.31.31';
+const PORT_WS = 9015; // Puerto para WebSockets
 
 const TOPIC_MENSAJE = 'abuela/mensaje';
 const TOPIC_CONFIRMACION = 'abuela/confirmacion';
