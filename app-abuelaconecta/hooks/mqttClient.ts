@@ -33,8 +33,16 @@ const BROKER = '10.56.31.31';
 const PORT_WS = 9015;
 
 const TOPIC_MENSAJE = 'abuela/mensaje';
+const TOPIC_RECETA = 'abuela/receta';
 const TOPIC_CONFIRMACION = 'abuela/confirmacion';
 const TOPIC_ALERTA = 'abuela/alerta';
+
+export interface PayloadReceta {
+  hora: string;
+  dia: string;
+  tipo: string;
+  mensaje: string;
+}
 
 // Conexión mediante WebSockets
 const client = mqtt.connect({ protocol: 'ws', host: BROKER, port: PORT_WS });
@@ -224,6 +232,29 @@ export function enviarMensaje(mensaje: string) {
       'No estás conectado al servidor MQTT'
     );
   }
+}
+
+export function enviarReceta(receta: PayloadReceta): Promise<void> {
+  if (!client.connected) {
+    return Promise.reject(
+      new Error('No estás conectado al servidor MQTT')
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    client.publish(
+      TOPIC_RECETA,
+      JSON.stringify(receta),
+      { qos: 1 },
+      (error) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      }
+    );
+  });
 }
 
 // ============================================================

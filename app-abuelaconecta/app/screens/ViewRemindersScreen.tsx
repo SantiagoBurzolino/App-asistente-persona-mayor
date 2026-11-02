@@ -12,37 +12,25 @@ import {
   RefreshControl,
 } from 'react-native';
 
-interface Reminder {
-  id: string;
-  text: string;
-  hour: number;
-  minute: number;
-}
-
-const SERVER_URL = 'http://10.56.31.31:1095';
+import {
+  eliminarRecordatorio,
+  obtenerRecordatorios,
+  StoredReminder,
+} from '@/services/remindersStorage';
 
 export default function ViewRemindersScreen() {
   const router = useRouter();
 
-  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [reminders, setReminders] = useState<StoredReminder[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const loadReminders = useCallback(async () => {
     setIsRefreshing(true);
 
     try {
-      const res = await fetch(`${SERVER_URL}/reminders`);
+      const data = await obtenerRecordatorios();
 
-      if (!res.ok) {
-        throw new Error('Error al cargar los recordatorios');
-      }
-
-      const data: Reminder[] = await res.json();
-
-      const sorted = data.sort(
-        (a, b) =>
-          a.hour * 60 + a.minute - (b.hour * 60 + b.minute)
-      );
+      const sorted = data.sort((a, b) => a.hora.localeCompare(b.hora));
 
       setReminders(sorted);
     } catch (error) {
@@ -50,7 +38,7 @@ export default function ViewRemindersScreen() {
 
       Alert.alert(
         'No se pudieron cargar',
-        'No pudimos obtener los recordatorios. Revisá que el servidor esté encendido e intentá nuevamente.'
+        'No pudimos leer el historial guardado en este dispositivo.'
       );
     } finally {
       setIsRefreshing(false);
@@ -66,7 +54,7 @@ export default function ViewRemindersScreen() {
   const handleDelete = (id: string) => {
     Alert.alert(
       'Eliminar recordatorio',
-      '¿Estás seguro de que querés eliminar este recordatorio?',
+      'Esto lo quitará del historial de este dispositivo, pero no cancela una receta que la Raspberry ya haya recibido. ¿Continuar?',
       [
         {
           text: 'Cancelar',
@@ -77,28 +65,15 @@ export default function ViewRemindersScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              const res = await fetch(
-                `${SERVER_URL}/delete-reminder`,
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                  },
-                  body: JSON.stringify({ id }),
-                }
-              );
-
-              if (!res.ok) {
-                throw new Error('Error al eliminar');
-              }
+              await eliminarRecordatorio(id);
 
               setReminders((prev) =>
                 prev.filter((reminder) => reminder.id !== id)
               );
 
               Alert.alert(
-                'Recordatorio eliminado',
-                'El recordatorio se eliminó correctamente.'
+                'Quitado del historial',
+                'Se eliminó de este dispositivo. La Raspberry no recibió una orden de cancelación.'
               );
             } catch (error) {
               console.error('Error al eliminar:', error);
@@ -168,13 +143,11 @@ export default function ViewRemindersScreen() {
               {/* Hora */}
               <View style={styles.timeContainer}>
                 <Text style={styles.time}>
-                  {`${String(reminder.hour).padStart(2, '0')}:${String(
-                    reminder.minute
-                  ).padStart(2, '0')}`}
+                  {reminder.hora}
                 </Text>
 
                 <Text style={styles.timeLabel}>
-                  Todos los días
+                  {reminder.dia}
                 </Text>
               </View>
 
@@ -185,7 +158,7 @@ export default function ViewRemindersScreen() {
                 </Text>
 
                 <Text style={styles.messageText}>
-                  {reminder.text}
+                  {`${reminder.tipo}\n${reminder.mensaje}`}
                 </Text>
               </View>
 
@@ -195,7 +168,7 @@ export default function ViewRemindersScreen() {
                 onPress={() => handleDelete(reminder.id)}
                 activeOpacity={0.7}
                 accessibilityRole="button"
-                accessibilityLabel={`Eliminar recordatorio: ${reminder.text}`}
+                accessibilityLabel={`Eliminar recordatorio: ${reminder.tipo}, ${reminder.mensaje}`}
               >
                 <Text style={styles.deleteIcon}>×</Text>
                 <Text style={styles.deleteButtonText}>

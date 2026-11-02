@@ -11,22 +11,30 @@ import {
   ScrollView,
 } from 'react-native';
 
-import { client, isConnected } from '@/hooks/mqttClient';
+import {
+  client,
+  enviarReceta,
+  isConnected,
+} from '@/hooks/mqttClient';
+import { guardarRecordatorio } from '@/services/remindersStorage';
 import { useRouter } from 'expo-router';
 
-interface Reminder {
-  id: string;
-  text: string;
-  hour: number;
-  minute: number;
-}
-
-const SERVER_URL = 'http://10.56.31.31:1095'; //server
+const DIAS_SEMANA = [
+  'Lunes',
+  'Martes',
+  'Miércoles',
+  'Jueves',
+  'Viernes',
+  'Sábado',
+  'Domingo',
+];
 
 export default function ReminderMqttScreen() {
   const router = useRouter();
 
   const [message, setMessage] = useState('');
+  const [medicationType, setMedicationType] = useState('');
+  const [day, setDay] = useState('');
   const [hour, setHour] = useState('17');
   const [minute, setMinute] = useState('00');
   const [connectionStatus, setConnectionStatus] = useState(isConnected());
@@ -53,10 +61,34 @@ export default function ReminderMqttScreen() {
 
     Keyboard.dismiss();
 
+    if (!day) {
+      Alert.alert(
+        'Falta elegir el día',
+        'Seleccioná el día de la semana para este recordatorio.'
+      );
+      return;
+    }
+
+    if (!connectionStatus) {
+      Alert.alert(
+        'Sin conexión',
+        'Esperá a que MQTT se conecte e intentá nuevamente.'
+      );
+      return;
+    }
+
     if (!message.trim()) {
       Alert.alert(
         'Falta el mensaje',
         'Escribí qué querés recordar antes de continuar.'
+      );
+      return;
+    }
+
+    if (!medicationType.trim()) {
+      Alert.alert(
+        'Falta el tipo de medicamento',
+        'Indicá qué medicamento o tratamiento corresponde al recordatorio.'
       );
       return;
     }
@@ -84,44 +116,48 @@ export default function ReminderMqttScreen() {
     const formattedHour = String(h).padStart(2, '0');
     const formattedMinute = String(m).padStart(2, '0');
 
-    const newReminder: Reminder = {
+    const receta = {
+      hora: `${formattedHour}:${formattedMinute}`,
+      dia: day,
+      tipo: medicationType.trim(),
+      mensaje: message.trim(),
+    };
+    const recordatorioLocal = {
+      ...receta,
       id: `${Date.now()}`,
-      text: message.trim(),
-      hour: h,
-      minute: m,
     };
 
     setSaving(true);
 
     try {
-      const res = await fetch(`${SERVER_URL}/save-reminder`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(newReminder),
-      });
+      await enviarReceta(receta);
 
-      if (!res.ok) {
-        throw new Error('Error guardando en el servidor');
+      setMessage('');
+      setMedicationType('');
+
+      try {
+        await guardarRecordatorio(recordatorioLocal);
+      } catch (storageError) {
+        console.error('Error al guardar el historial local:', storageError);
+        Alert.alert(
+          'Receta enviada',
+          'El broker aceptó la receta, pero no se pudo guardar en el historial de este dispositivo. No la reenvíes para evitar duplicarla.'
+        );
+        return;
       }
 
       Alert.alert(
-        '¡Recordatorio guardado!',
-        `Se guardó tu recordatorio diario para las ${formattedHour}:${formattedMinute}.`,
-        [
-          {
-            text: 'Ver recordatorios',
-            onPress: () => router.push('/screens/ViewRemindersScreen'),
-          },
-        ]
+        'Receta enviada',
+        `El broker MQTT aceptó la receta para ${day} a las ${formattedHour}:${formattedMinute}. Ya aparece en el historial de este dispositivo.`
       );
     } catch (error) {
-      console.error('Error al guardar el recordatorio:', error);
+      console.error('Error al enviar la receta MQTT:', error);
 
       Alert.alert(
-        'No se pudo guardar',
-        'El servidor no respondió. Revisá que esté encendido y que el celular esté conectado a la red correcta.'
+        'No se pudo enviar',
+        error instanceof Error
+          ? error.message
+          : 'El broker MQTT no confirmó la recepción. Revisá la conexión e intentá nuevamente.'
       );
     } finally {
       setSaving(false);
@@ -173,13 +209,56 @@ export default function ReminderMqttScreen() {
 
       {/* Formulario */}
       <View style={styles.card}>
-        <Text style={styles.label}>
-          ¿Qué querés recordar?
+        <Text style={styles.label}>Día</Text>
+
+        <View style={styles.daysRow}>
+          {DIAS_SEMANA.map((weekday) => {
+            const selected = day === weekday;
+
+            return (
+              <TouchableOpacity
+                key={weekday}
+                style={[
+                  styles.dayButton,
+                  selected && styles.selectedDayButton,
+                ]}
+                onPress={() => setDay(weekday)}
+                accessibilityRole="button"
+                accessibilityState={{ selected }}
+                accessibilityLabel={`Día ${weekday}`}
+              >
+                <Text
+                  style={[
+                    styles.dayButtonText,
+                    selected && styles.selectedDayButtonText,
+                  ]}
+                >
+                  {weekday}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        <Text style={styles.label}>Tipo de medicamento</Text>
+
+        <TextInput
+          style={styles.singleLineInput}
+          placeholder="Ej.: Presión"
+          placeholderTextColor="#697586"
+          value={medicationType}
+          onChangeText={setMedicationType}
+          maxLength={100}
+          accessibilityLabel="Tipo de medicamento"
+        />
+
+        <Text style={[styles.label, styles.messageLabel]}>
+          Mensaje para el parlante
         </Text>
 
         <TextInput
           style={styles.messageInput}
-          placeholder="Ej.: Tomar los medicamentos"
+          placeholder="Ej.: Hola, es hora de tomar la pastilla de la presión."
           placeholderTextColor="#697586"
           value={message}
           onChangeText={setMessage}
@@ -190,7 +269,7 @@ export default function ReminderMqttScreen() {
         />
 
         <Text style={styles.helperText}>
-          Escribí un mensaje fácil de recordar.
+          Este texto se enviará en el campo “mensaje” para que lo lea el TTS.
         </Text>
 
         <Text style={styles.label}>
@@ -367,6 +446,56 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#17365D',
     marginBottom: 14,
+  },
+
+  daysRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 24,
+  },
+
+  dayButton: {
+    width: '31%',
+    minHeight: 52,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#F4F7FB',
+    borderWidth: 1,
+    borderColor: '#C8D5E5',
+    borderRadius: 10,
+    paddingHorizontal: 6,
+  },
+
+  selectedDayButton: {
+    backgroundColor: '#17365D',
+    borderColor: '#17365D',
+  },
+
+  dayButtonText: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: '#17365D',
+  },
+
+  selectedDayButtonText: {
+    color: '#FFFFFF',
+  },
+
+  singleLineInput: {
+    minHeight: 64,
+    backgroundColor: '#F4F7FB',
+    borderWidth: 1,
+    borderColor: '#C8D5E5',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    fontSize: 21,
+    color: '#172B4D',
+    marginBottom: 20,
+  },
+
+  messageLabel: {
+    marginTop: 4,
   },
 
   messageInput: {
