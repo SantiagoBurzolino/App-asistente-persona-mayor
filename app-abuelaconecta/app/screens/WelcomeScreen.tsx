@@ -31,32 +31,31 @@ export default function MessageScreen() {
     };
   }, []);
 
-  const handleSendMessage = () => {
+  const handleSendMessage = async () => {
     // 👈 Comprobación adicional: Si el botón está desactivado o la app está enviando, salimos.
     if (!connectionStatus || isSending) {
       if (!connectionStatus) Alert.alert("Error", "Esperando conexión con el servidor...");
       return;
     }
 
-    if (message.trim()) {
-      // 1. Deshabilitar el botón y mostrar que está enviando
-      setIsSending(true);
+    if (!message.trim()) return;
 
-      // 2. Enviar mensaje MQTT
-      enviarMensaje(message);
-
-      // 3. Programar el re-habilitamiento del botón después de 3 segundos
-      setTimeout(() => {
-        setIsSending(false);
-      }, 3000); // 👈 El timeout: 3000 milisegundos (3 segundos)
-
-      // 4. Limpiar el campo y redirigir
+    setIsSending(true);
+    try {
+      await enviarMensaje(message.trim());
       setMessage("");
       setShowSuccess(true);
       setTimeout(() => {
         setShowSuccess(false);
         router.push('/screens/MenuScreen');
       }, 2000);
+    } catch (error) {
+      Alert.alert(
+        "Error al enviar",
+        error instanceof Error ? error.message : "No se pudo enviar el mensaje."
+      );
+    } finally {
+      setIsSending(false);
     }
   };
 

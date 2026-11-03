@@ -193,45 +193,29 @@ client.on('close', () => {
 // ENVIAR MENSAJE
 // ============================================================
 
-export function enviarMensaje(mensaje: string) {
-  if (client.connected) {
+export function enviarMensaje(mensaje: string): Promise<void> {
+  if (!client.connected) {
+    return Promise.reject(
+      new Error('No estás conectado al servidor MQTT')
+    );
+  }
 
+  return new Promise((resolve, reject) => {
     client.publish(
       TOPIC_MENSAJE,
       mensaje,
+      { qos: 1 },
       (error) => {
-
         if (error) {
-          console.log(
-            '❌ Error al enviar mensaje:',
-            error
-          );
-
-          Alert.alert(
-            'Error',
-            'No se pudo enviar el mensaje'
-          );
-
+          console.log('❌ Error al enviar mensaje:', error);
+          reject(error);
         } else {
-          console.log(
-            '✅ Mensaje enviado:',
-            mensaje
-          );
+          console.log('✅ Mensaje enviado:', mensaje);
+          resolve();
         }
       }
     );
-
-  } else {
-
-    console.log(
-      '⚠️ Intento de enviar sin conexión MQTT'
-    );
-
-    Alert.alert(
-      'Error',
-      'No estás conectado al servidor MQTT'
-    );
-  }
+  });
 }
 
 export function enviarReceta(receta: PayloadReceta): Promise<void> {

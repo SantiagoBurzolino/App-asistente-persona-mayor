@@ -44,7 +44,7 @@ export default function MessageScreen() {
     };
   }, []);
 
-  const handleSendMessage = () => {
+  const handleSendMessage = async () => {
     if (!connectionStatus) {
       Alert.alert(
         'Sin conexión',
@@ -66,19 +66,22 @@ export default function MessageScreen() {
     setSending(true);
 
     try {
-      enviarMensaje(message.trim());
+      await enviarMensaje(message.trim());
       setMessage('');
       setShowSuccess(true);
 
       setTimeout(() => setShowSuccess(false), 3000);
-      setTimeout(() => setSending(false), 1500);
     } catch (error) {
-      setSending(false);
+      console.error('Error al enviar el mensaje MQTT:', error);
 
       Alert.alert(
         'Error al enviar',
-        'No se pudo enviar el mensaje. Inténtalo nuevamente.'
+        error instanceof Error
+          ? error.message
+          : 'No se pudo enviar el mensaje. Inténtalo nuevamente.'
       );
+    } finally {
+      setSending(false);
     }
   };
 
