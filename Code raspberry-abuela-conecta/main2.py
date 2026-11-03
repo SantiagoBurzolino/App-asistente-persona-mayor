@@ -1,22 +1,37 @@
 import paho.mqtt.client as mqtt
 import os
 import json
+import hashlib
+import shutil
+import sys
 import RPi.GPIO as GPIO
 import time
 from datetime import datetime
 import threading
 import subprocess
+from pathlib import Path
 
 # --- 1. CONFIGURACIÓN GENERAL ---
 BROKER = "10.56.31.31"
 PORT = 1883
 TOPIC_MENSAJE = "abuela/mensaje"
 TOPIC_NUEVA_RECETA = "abuela/receta"
+TOPIC_ESTADO_RECETA = "abuela/receta/estado"
 TOPIC_CONFIRMACION = "abuela/confirmacion"
+TOPIC_HISTORIAL_CONFIRMACIONES = "abuela/confirmaciones/historial"
 TOPIC_ALERTA = "abuela/alerta"
 DIAS_SEMANA = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-ARCHIVO_ALERTAS = "alertas.json"
+DIRECTORIO_APP = Path(__file__).resolve().parent
+ARCHIVO_ALERTAS = DIRECTORIO_APP / "alertas.json"
+ARCHIVO_CONFIRMACIONES = DIRECTORIO_APP / "confirmaciones.json"
+DIRECTORIO_AUDIO = DIRECTORIO_APP / "audio_recordatorios"
+MODELO_PIPER = DIRECTORIO_APP / "voices" / "es_ES-carlfm-x_low.onnx"
+CONFIG_PIPER = Path(f"{MODELO_PIPER}.json")
+PIPER_BINARIO = shutil.which("piper")
+COMANDO_PIPER = [PIPER_BINARIO] if PIPER_BINARIO else [sys.executable, "-m", "piper"]
+REPRODUCTOR_AUDIO = shutil.which("aplay")
+AUDIO_DEVICE = os.environ.get("ABUELACONECTA_AUDIO_DEVICE", "plughw:1,0")
 
 # Pines físicos (20 y 21 en modo BCM)
 BOTON_CONFIRMACION = 20  
@@ -35,6 +50,8 @@ ultimo_replay = 0
 medicamento_actual = ""
 hora_inicio_alerta = 0
 proceso_audio = None
+audio_lock = threading.Lock()
+sintesis_lock = threading.Lock()
 
 # --- 4. MANEJO DE DATOS Y AUDIO OFFLINE ---
 def normalizar_alerta(alerta):
@@ -49,15 +66,29 @@ def normalizar_alerta(alerta):
     except ValueError:
         return None
 
-    dia_recibido = str(alerta.get("dia") or "").strip()
-    dias_por_nombre = {dia.casefold(): dia for dia in DIAS_SEMANA}
-    dia = dias_por_nombre.get(dia_recibido.casefold())
-    if dia_recibido and dia is None:
+    dias_recibidos = alerta.get("dias")
+    if dias_recibidos is None:
+        dia_anterior = str(alerta.get("dia") or "").strip()
+        dias_recibidos = [dia_anterior] if dia_anterior else DIAS_SEMANA
+    elif isinstance(dias_recibidos, str):
+        dias_recibidos = [dias_recibidos]
+    if not isinstance(dias_recibidos, list):
         return None
+
+    dias_por_nombre = {dia.casefold(): dia for dia in DIAS_SEMANA}
+    dias = []
+    for dia_recibido in dias_recibidos:
+        dia = dias_por_nombre.get(str(dia_recibido).strip().casefold())
+        if dia is None:
+            return None
+        if dia not in dias:
+            dias.append(dia)
+    if not dias:
+        dias = DIAS_SEMANA.copy()
 
     return {
         "hora": hora,
-        "dia": dia or "",
+        "dias": dias,
         "tipo": str(alerta.get("tipo") or alerta.get("medicamento") or "").strip(),
         "mensaje": str(alerta.get("mensaje") or "").strip(),
     }
@@ -67,9 +98,9 @@ def cargar_alertas():
     if not os.path.exists(ARCHIVO_ALERTAS):
         alertas_base = [{
             "hora": "08:00",
-            "dia": "",
+            "dias": DIAS_SEMANA.copy(),
             "tipo": "Pastilla para la presión",
-            "mensaje": "",
+            "mensaje": "Hola, es hora de tomar tu medicamento para la presión.",
         }]
         with open(ARCHIVO_ALERTAS, 'w') as archivo:
             json.dump(alertas_base, archivo, indent=4)
@@ -91,15 +122,183 @@ def cargar_alertas():
 
 lista_alertas = cargar_alertas()
 
-def reproducir_audio_asincrono(texto):
+
+def cargar_confirmaciones():
+    if not ARCHIVO_CONFIRMACIONES.exists():
+        with open(ARCHIVO_CONFIRMACIONES, "w", encoding="utf-8") as archivo:
+            json.dump([], archivo)
+        return []
+
+    try:
+        with open(ARCHIVO_CONFIRMACIONES, "r", encoding="utf-8") as archivo:
+            datos = json.load(archivo)
+    except (json.JSONDecodeError, OSError) as error:
+        print(f"⚠️ No se pudo leer el historial local: {error}")
+        return []
+
+    return datos if isinstance(datos, list) else []
+
+
+lista_confirmaciones = cargar_confirmaciones()
+
+
+def publicar_historial_confirmaciones(cliente):
+    try:
+        cliente.publish(
+            TOPIC_HISTORIAL_CONFIRMACIONES,
+            json.dumps(lista_confirmaciones, ensure_ascii=False),
+            qos=1,
+            retain=True,
+        )
+    except Exception as error:
+        print(f"⚠️ No se pudo sincronizar el historial MQTT: {error}")
+
+
+def publicar_estado_receta(cliente, solicitud_id, ok, error=""):
+    if not solicitud_id:
+        return
+    cliente.publish(
+        TOPIC_ESTADO_RECETA,
+        json.dumps({"id": solicitud_id, "ok": ok, "error": error}, ensure_ascii=False),
+        qos=1,
+    )
+
+
+def guardar_confirmaciones():
+    with open(ARCHIVO_CONFIRMACIONES, "w", encoding="utf-8") as archivo:
+        json.dump(lista_confirmaciones, archivo, indent=2, ensure_ascii=False)
+
+
+def ruta_audio_recordatorio(texto):
+    nombre = hashlib.sha256(texto.encode("utf-8")).hexdigest()
+    return DIRECTORIO_AUDIO / f"{nombre}.wav"
+
+
+def generar_audio(texto, destino):
+    if not MODELO_PIPER.is_file() or not CONFIG_PIPER.is_file():
+        raise FileNotFoundError(
+            f"Falta el modelo Piper o su configuración: {MODELO_PIPER}"
+        )
+
+    DIRECTORIO_AUDIO.mkdir(parents=True, exist_ok=True)
+    temporal = destino.with_name(f".{destino.stem}.{threading.get_ident()}.wav")
+    comando = COMANDO_PIPER + [
+        "--model", str(MODELO_PIPER),
+        "--output_file", str(temporal),
+    ]
+    try:
+        with sintesis_lock:
+            subprocess.run(
+                comando,
+                input=f"{texto.strip()}\n",
+                text=True,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
+        if not temporal.is_file() or temporal.stat().st_size <= 44:
+            raise RuntimeError("Piper no generó un WAV válido.")
+        os.replace(temporal, destino)
+    except subprocess.CalledProcessError as error:
+        detalle = error.stderr.strip() if error.stderr else str(error)
+        raise RuntimeError(f"Piper no pudo sintetizar el texto: {detalle}") from error
+    finally:
+        if temporal.exists():
+            temporal.unlink()
+
+
+def detener_audio_actual():
     global proceso_audio
     if proceso_audio and proceso_audio.poll() is None:
         proceso_audio.terminate()
+        try:
+            proceso_audio.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proceso_audio.kill()
+            proceso_audio.wait()
+    proceso_audio = None
+
+
+def comando_reproductor_audio(ruta):
+    return [REPRODUCTOR_AUDIO, "-q", "-D", AUDIO_DEVICE, str(ruta)]
+
+
+def reproducir_archivo_asincrono(ruta):
+    global proceso_audio
+    if not REPRODUCTOR_AUDIO:
+        print("❌ No se encontró aplay; instalá alsa-utils para reproducir los WAV.")
+        return
+    if not ruta.is_file():
+        print(f"❌ No existe el audio local del recordatorio: {ruta}")
+        return
+
+    with audio_lock:
+        detener_audio_actual()
+        proceso_audio = subprocess.Popen(
+            comando_reproductor_audio(ruta),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
+def preparar_audios_recordatorios(alertas):
+    for alerta in alertas:
+        texto = alerta["mensaje"]
+        if not texto:
+            continue
+        ruta = ruta_audio_recordatorio(texto)
+        if not ruta.exists():
+            try:
+                generar_audio(texto, ruta)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                print(f"⚠️ No se pudo preparar el audio offline: {error}")
+
+
+def registrar_confirmacion(cliente, medicamento):
+    ahora = datetime.now().astimezone()
+    registro = {
+        "medicamento": medicamento,
+        "fecha_hora": ahora.isoformat(timespec="seconds"),
+    }
+    with lock:
+        lista_confirmaciones.append(registro)
+        try:
+            guardar_confirmaciones()
+        except OSError as error:
+            print(f"⚠️ No se pudo guardar la confirmación local: {error}")
+        historial = json.dumps(lista_confirmaciones, ensure_ascii=False)
+
     try:
-        # Llama a espeak-ng de forma local
-        proceso_audio = subprocess.Popen(['espeak-ng', '-v', 'es-la', '-s', '140', texto])
-    except Exception as e:
-        print(f"⚠️ Error al ejecutar espeak: {e}")
+        cliente.publish(TOPIC_CONFIRMACION, json.dumps(registro, ensure_ascii=False), qos=1)
+        cliente.publish(TOPIC_HISTORIAL_CONFIRMACIONES, historial, qos=1, retain=True)
+    except Exception as error:
+        print(f"⚠️ Confirmación guardada localmente; no se pudo publicar: {error}")
+
+
+preparar_audios_recordatorios(lista_alertas)
+
+def reproducir_audio_asincrono(texto):
+    global proceso_audio
+    if not texto.strip():
+        return
+    if not REPRODUCTOR_AUDIO:
+        print("❌ No se encontró aplay; instalá alsa-utils para reproducir los WAV.")
+        return
+
+    ruta_temporal = DIRECTORIO_AUDIO / "tts_dinamico.wav"
+    with audio_lock:
+        detener_audio_actual()
+        try:
+            generar_audio(texto, ruta_temporal)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            print(f"⚠️ No se pudo sintetizar con Piper: {error}")
+            return
+        proceso_audio = subprocess.Popen(
+            comando_reproductor_audio(ruta_temporal),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 # --- 5. FUNCIONES DE BOTONES ---
 def enviar_confirmacion(cliente):
@@ -110,13 +309,17 @@ def enviar_confirmacion(cliente):
         alerta_activa = False
         if proceso_audio and proceso_audio.poll() is None:
             proceso_audio.terminate()
-        hora_confirmacion = datetime.now().strftime('%H:%M')
-        mensaje_confirmacion = f"La pastilla {medicamento_actual} fue tomada a las {hora_confirmacion}."
+        medicamento_confirmado = medicamento_actual
+        fecha_confirmacion = datetime.now().astimezone()
+        mensaje_confirmacion = (
+            f"La medicación {medicamento_confirmado} fue confirmada "
+            f"el {fecha_confirmacion.strftime('%d/%m/%Y a las %H:%M')}."
+        )
         medicamento_actual = "" 
 
     print("🟢 " + mensaje_confirmacion)
+    registrar_confirmacion(cliente, medicamento_confirmado)
     reproducir_audio_asincrono("Confirmado. Que tengas un buen día.")
-    cliente.publish(TOPIC_CONFIRMACION, mensaje_confirmacion)
 
 def enviar_alerta_sos(cliente):
     global proceso_audio
@@ -130,7 +333,11 @@ def enviar_alerta_sos(cliente):
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
         print("✅ Conectado al broker MQTT")
-        client.subscribe([(TOPIC_MENSAJE, 0), (TOPIC_NUEVA_RECETA, 0)])
+        client.subscribe([
+            (TOPIC_MENSAJE, 0),
+            (TOPIC_NUEVA_RECETA, 0),
+        ])
+        publicar_historial_confirmaciones(client)
     else:
         print(f"❌ Error de conexión: {rc}")
 
@@ -145,8 +352,11 @@ def on_message(client, userdata, msg):
             reproducir_audio_asincrono(payload)
         
     elif tema == TOPIC_NUEVA_RECETA:
+        solicitud_id = None
         try:
             recibidas = json.loads(payload)
+            if isinstance(recibidas, dict):
+                solicitud_id = str(recibidas.get("id") or "")
             reemplazar_lista = isinstance(recibidas, list)
             if isinstance(recibidas, dict):
                 recibidas = [recibidas]
@@ -156,6 +366,12 @@ def on_message(client, userdata, msg):
             alertas_recibidas = [normalizar_alerta(item) for item in recibidas]
             if not alertas_recibidas or any(alerta is None for alerta in alertas_recibidas):
                 raise ValueError("La receta contiene datos inválidos.")
+
+            for alerta in alertas_recibidas:
+                if alerta["mensaje"]:
+                    ruta_audio = ruta_audio_recordatorio(alerta["mensaje"])
+                    if not ruta_audio.exists():
+                        generar_audio(alerta["mensaje"], ruta_audio)
 
             with lock:
                 if reemplazar_lista:
@@ -172,13 +388,15 @@ def on_message(client, userdata, msg):
                 with open(ARCHIVO_ALERTAS, 'w') as archivo:
                     json.dump(nuevas_alertas, archivo, indent=4, ensure_ascii=False)
                 lista_alertas = nuevas_alertas
+            publicar_estado_receta(client, solicitud_id, True)
             if hubo_novedad:
                 print("📝 Nuevo recordatorio recibido y guardado.")
                 reproducir_audio_asincrono("Llegó un nuevo recordatorio.")
             else:
                 print("ℹ️ El recordatorio recibido ya estaba guardado.")
-        except (json.JSONDecodeError, ValueError, OSError) as error:
+        except (json.JSONDecodeError, ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
             print(f"❌ No se pudo guardar la receta: {error}")
+            publicar_estado_receta(client, solicitud_id, False, str(error))
 
 # --- 7. INICIO MQTT ---
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
@@ -204,7 +422,7 @@ try:
         if hora_actual != ultimo_minuto_revisado:
             with lock:
                 for alerta in lista_alertas:
-                    if alerta["hora"] == hora_actual and alerta["dia"] in ("", dia_actual):
+                    if alerta["hora"] == hora_actual and dia_actual in alerta["dias"]:
                         mensaje_recordatorio = alerta["mensaje"].strip()
                         if not mensaje_recordatorio:
                             print("⚠️ Recordatorio sin texto en el campo mensaje; se omite el TTS.")
@@ -226,7 +444,9 @@ try:
                     print("⌛ Tiempo expirado. Alarma cancelada.")
                 elif ahora - ultimo_replay > 20:
                     print("🔁 Repitiendo recordatorio…")
-                    reproducir_audio_asincrono(mensaje_actual)
+                    reproducir_archivo_asincrono(
+                        ruta_audio_recordatorio(mensaje_actual)
+                    )
                     ultimo_replay = ahora
 
         if GPIO.input(BOTON_CONFIRMACION) == GPIO.LOW:

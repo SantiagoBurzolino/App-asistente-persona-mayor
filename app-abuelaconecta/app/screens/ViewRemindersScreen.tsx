@@ -147,7 +147,9 @@ export default function ViewRemindersScreen() {
                 </Text>
 
                 <Text style={styles.timeLabel}>
-                  {reminder.dia}
+                  {reminder.dias.length === 7
+                    ? 'Todos los días'
+                    : reminder.dias.join(', ')}
                 </Text>
               </View>
 

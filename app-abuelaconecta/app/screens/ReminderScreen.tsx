@@ -34,7 +34,7 @@ export default function ReminderMqttScreen() {
 
   const [message, setMessage] = useState('');
   const [medicationType, setMedicationType] = useState('');
-  const [day, setDay] = useState('');
+  const [days, setDays] = useState<string[]>(DIAS_SEMANA);
   const [hour, setHour] = useState('17');
   const [minute, setMinute] = useState('00');
   const [connectionStatus, setConnectionStatus] = useState(isConnected());
@@ -61,10 +61,10 @@ export default function ReminderMqttScreen() {
 
     Keyboard.dismiss();
 
-    if (!day) {
+    if (days.length === 0) {
       Alert.alert(
-        'Falta elegir el día',
-        'Seleccioná el día de la semana para este recordatorio.'
+        'Falta elegir los días',
+        'Seleccioná al menos un día o volvé a marcar “Todos”.'
       );
       return;
     }
@@ -115,10 +115,12 @@ export default function ReminderMqttScreen() {
 
     const formattedHour = String(h).padStart(2, '0');
     const formattedMinute = String(m).padStart(2, '0');
+    const selectedDays = days;
 
     const receta = {
+      id: `${Date.now()}`,
       hora: `${formattedHour}:${formattedMinute}`,
-      dia: day,
+      dias: selectedDays,
       tipo: medicationType.trim(),
       mensaje: message.trim(),
     };
@@ -148,7 +150,7 @@ export default function ReminderMqttScreen() {
 
       Alert.alert(
         'Receta enviada',
-        `El broker MQTT aceptó la receta para ${day} a las ${formattedHour}:${formattedMinute}. Ya aparece en el historial de este dispositivo.`
+        `El broker MQTT aceptó la receta para ${selectedDays.length === 7 ? 'todos los días' : selectedDays.join(', ')} a las ${formattedHour}:${formattedMinute}. Ya aparece en el historial de este dispositivo.`
       );
     } catch (error) {
       console.error('Error al enviar la receta MQTT:', error);
@@ -157,7 +159,7 @@ export default function ReminderMqttScreen() {
         'No se pudo enviar',
         error instanceof Error
           ? error.message
-          : 'El broker MQTT no confirmó la recepción. Revisá la conexión e intentá nuevamente.'
+          : 'La Raspberry no confirmó el guardado del recordatorio. Revisá la conexión e intentá nuevamente.'
       );
     } finally {
       setSaving(false);
@@ -209,11 +211,31 @@ export default function ReminderMqttScreen() {
 
       {/* Formulario */}
       <View style={styles.card}>
-        <Text style={styles.label}>Día</Text>
+        <Text style={styles.label}>Días de la semana</Text>
 
         <View style={styles.daysRow}>
+          <TouchableOpacity
+            style={[
+              styles.dayButton,
+              days.length === DIAS_SEMANA.length && styles.selectedDayButton,
+            ]}
+            onPress={() => setDays(DIAS_SEMANA)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: days.length === DIAS_SEMANA.length }}
+            accessibilityLabel="Todos los días"
+          >
+            <Text
+              style={[
+                styles.dayButtonText,
+                days.length === DIAS_SEMANA.length && styles.selectedDayButtonText,
+              ]}
+            >
+              Todos
+            </Text>
+          </TouchableOpacity>
+
           {DIAS_SEMANA.map((weekday) => {
-            const selected = day === weekday;
+            const selected = days.includes(weekday);
 
             return (
               <TouchableOpacity
@@ -222,7 +244,13 @@ export default function ReminderMqttScreen() {
                   styles.dayButton,
                   selected && styles.selectedDayButton,
                 ]}
-                onPress={() => setDay(weekday)}
+                onPress={() =>
+                  setDays((currentDays) =>
+                    currentDays.includes(weekday)
+                      ? currentDays.filter((currentDay) => currentDay !== weekday)
+                      : [...currentDays, weekday]
+                  )
+                }
                 accessibilityRole="button"
                 accessibilityState={{ selected }}
                 accessibilityLabel={`Día ${weekday}`}
@@ -345,7 +373,7 @@ export default function ReminderMqttScreen() {
         disabled={saving}
         activeOpacity={0.7}
         accessibilityRole="button"
-        accessibilityLabel="Guardar recordatorio diario"
+        accessibilityLabel="Guardar recordatorio"
       >
         <Text style={styles.saveButtonText}>
           {saving ? 'Guardando...' : 'Guardar recordatorio'}

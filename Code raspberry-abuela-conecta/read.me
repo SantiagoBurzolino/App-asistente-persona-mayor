@@ -1,2 +1,23 @@
-python3 main.py
-sudo apt install python3-rpi.gpio -y
+# Configuracion (Raspberry Pi OS de 64 bits recomendado)
+sudo apt install python3-rpi.gpio python3-venv python3-full alsa-utils wget -y
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install paho-mqtt piper-tts
+
+# Voz es_ES-carlfm-x_low y su configuracion (ambos archivos son necesarios)
+mkdir -p voices
+wget -O voices/es_ES-carlfm-x_low.onnx https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/es/es_ES/carlfm/x_low/es_ES-carlfm-x_low.onnx
+wget -O voices/es_ES-carlfm-x_low.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/es/es_ES/carlfm/x_low/es_ES-carlfm-x_low.onnx.json
+
+# Probar Piper y los parlantes
+printf 'Prueba de voz Piper.' | .venv/bin/python -m piper -m voices/es_ES-carlfm-x_low.onnx -f /tmp/prueba-piper.wav
+aplay /tmp/prueba-piper.wav
+
+# Ejecutar la version actualizada
+.venv/bin/python main2.py
+
+# main2.py conserva los horarios en alertas.json, las tomas confirmadas en
+# confirmaciones.json y el audio WAV de cada mensaje en audio_recordatorios/.
+# Para que el reloj siga siendo correcto sin Internet, configurar y comprobar
+# el RTC del sistema operativo de la Raspberry Pi antes de desconectar la red.
+# La salida ALSA predeterminada es plughw:1,0 (conector analogico Headphones).
+# Para cambiarla: ABUELACONECTA_AUDIO_DEVICE=plughw:0,0 .venv/bin/python main2.py

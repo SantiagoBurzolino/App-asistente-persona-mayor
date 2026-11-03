@@ -50,6 +50,18 @@ export default function MenuScreen() {
           <Text style={styles.buttonText}>Ver recordatorios</Text>
           <Text style={styles.arrow}>›</Text>
         </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.button}
+          activeOpacity={0.7}
+          onPress={() => router.push('/screens/ViewConfirmationsScreen')}
+          accessibilityRole="button"
+          accessibilityLabel="Ver historial de tomas confirmadas"
+        >
+          <Text style={styles.icon}>✓</Text>
+          <Text style={styles.buttonText}>Historial de tomas</Text>
+          <Text style={styles.arrow}>›</Text>
+        </TouchableOpacity>
       </View>
 
       <TouchableOpacity

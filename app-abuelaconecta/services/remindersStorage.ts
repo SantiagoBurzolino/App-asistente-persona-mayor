@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 export interface StoredReminder {
   id: string;
   hora: string;
-  dia: string;
+  dias: string[];
   tipo: string;
   mensaje: string;
 }
@@ -12,7 +12,17 @@ const STORAGE_KEY = 'abuelaconecta:recetas';
 
 export async function obtenerRecordatorios(): Promise<StoredReminder[]> {
   const stored = await AsyncStorage.getItem(STORAGE_KEY);
-  return stored ? (JSON.parse(stored) as StoredReminder[]) : [];
+  if (!stored) return [];
+
+  const records = JSON.parse(stored) as (StoredReminder & { dia?: string })[];
+  return records.map(({ dia, ...record }) => ({
+    ...record,
+    dias: Array.isArray(record.dias)
+      ? record.dias
+      : dia
+        ? [dia]
+        : [],
+  }));
 }
 
 export async function guardarRecordatorio(
