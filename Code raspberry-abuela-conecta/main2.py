@@ -10,6 +10,8 @@ from datetime import datetime
 import threading
 import subprocess
 from pathlib import Path
+from piper import PiperVoice
+import wave
 
 # --- 1. CONFIGURACIÓN GENERAL ---
 BROKER = "10.56.31.31"
@@ -28,20 +30,36 @@ ARCHIVO_CONFIRMACIONES = DIRECTORIO_APP / "confirmaciones.json"
 DIRECTORIO_AUDIO = DIRECTORIO_APP / "audio_recordatorios"
 MODELO_PIPER = DIRECTORIO_APP / "voices" / "es_ES-carlfm-x_low.onnx"
 CONFIG_PIPER = Path(f"{MODELO_PIPER}.json")
-PIPER_BINARIO = shutil.which("piper")
-COMANDO_PIPER = [PIPER_BINARIO] if PIPER_BINARIO else [sys.executable, "-m", "piper"]
-REPRODUCTOR_AUDIO = shutil.which("aplay")
-AUDIO_DEVICE = os.environ.get("ABUELACONECTA_AUDIO_DEVICE", "plughw:1,0")
+voz_piper = None
 
+# --- CONFIGURACIÓN PIPER ---
+PIPER_BINARIO = str(DIRECTORIO_APP / ".venv" / "bin" / "piper")
+
+if not os.path.isfile(PIPER_BINARIO):
+    raise RuntimeError(f"No se encontró Piper: {PIPER_BINARIO}")
+
+COMANDO_PIPER = [PIPER_BINARIO]
+
+print(f"🔊 Piper encontrado en: {PIPER_BINARIO}")
+# --- CONFIGURACIÓN DE AUDIO ---
+REPRODUCTOR_AUDIO = shutil.which("aplay")
+DISPOSITIVO_AUDIO = "plughw:1,0"
+
+if not REPRODUCTOR_AUDIO:
+    raise RuntimeError("No se encontró aplay. Instala alsa-utils.")
+
+print(f"🔊 Reproductor: {REPRODUCTOR_AUDIO}")
+print(f"🔊 Salida de audio: {DISPOSITIVO_AUDIO}")
 # Pines físicos (20 y 21 en modo BCM)
 BOTON_CONFIRMACION = 20  
 BOTON_ALERTA = 21        
 
 # --- 2. CONFIGURACIÓN GPIO ---
+print("DEBUG: Iniciando configuración GPIO", flush=True)
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(BOTON_ALERTA, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(BOTON_CONFIRMACION, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
+print("DEBUG: GPIO configurado correctamente", flush=True)
 # --- 3. VARIABLES GLOBALES ---
 lock = threading.Lock()
 alerta_activa = False
@@ -120,6 +138,7 @@ def cargar_alertas():
             json.dump(alertas, archivo, indent=4, ensure_ascii=False)
     return alertas
 
+print("DEBUG: Cargando alertas", flush=True)
 lista_alertas = cargar_alertas()
 
 
@@ -138,9 +157,9 @@ def cargar_confirmaciones():
 
     return datos if isinstance(datos, list) else []
 
-
+print("DEBUG: Cargando confirmaciones", flush=True)
 lista_confirmaciones = cargar_confirmaciones()
-
+print("DEBUG: Confirmaciones cargadas correctamente", flush=True)
 
 def publicar_historial_confirmaciones(cliente):
     try:
@@ -173,74 +192,102 @@ def ruta_audio_recordatorio(texto):
     nombre = hashlib.sha256(texto.encode("utf-8")).hexdigest()
     return DIRECTORIO_AUDIO / f"{nombre}.wav"
 
+def cargar_audio():
+    global voz_piper
 
-def generar_audio(texto, destino):
     if not MODELO_PIPER.is_file() or not CONFIG_PIPER.is_file():
         raise FileNotFoundError(
             f"Falta el modelo Piper o su configuración: {MODELO_PIPER}"
         )
 
+    print("🔊 Cargando modelo Piper en memoria...", flush=True)
+
+    inicio = time.time()
+
+    voz_piper = PiperVoice.load(
+        str(MODELO_PIPER),
+        config_path=str(CONFIG_PIPER)
+    )
+
+    print(
+        f"✅ Modelo Piper cargado en {time.time() - inicio:.2f} segundos.",
+        flush=True
+    )
+
+def generar_audio(texto, destino):
+    global voz_piper
+
+    if voz_piper is None:
+        raise RuntimeError("El modelo Piper no está cargado.")
+
+    if not texto or not texto.strip():
+        raise ValueError("No se puede generar audio vacío.")
+
     DIRECTORIO_AUDIO.mkdir(parents=True, exist_ok=True)
-    temporal = destino.with_name(f".{destino.stem}.{threading.get_ident()}.wav")
-    comando = COMANDO_PIPER + [
-        "--model", str(MODELO_PIPER),
-        "--output_file", str(temporal),
-    ]
+
+    temporal = destino.with_name(
+        f".{destino.stem}.{threading.get_ident()}.wav"
+    )
+
     try:
         with sintesis_lock:
-            subprocess.run(
-                comando,
-                input=f"{texto.strip()}\n",
-                text=True,
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=120,
-            )
+            with wave.open(str(temporal), "wb") as archivo:
+                voz_piper.synthesize_wav(
+                    texto.strip(),
+                    archivo
+                )
+
         if not temporal.is_file() or temporal.stat().st_size <= 44:
             raise RuntimeError("Piper no generó un WAV válido.")
+
         os.replace(temporal, destino)
-    except subprocess.CalledProcessError as error:
-        detalle = error.stderr.strip() if error.stderr else str(error)
-        raise RuntimeError(f"Piper no pudo sintetizar el texto: {detalle}") from error
+
     finally:
         if temporal.exists():
             temporal.unlink()
 
-
 def detener_audio_actual():
     global proceso_audio
-    if proceso_audio and proceso_audio.poll() is None:
-        proceso_audio.terminate()
-        try:
-            proceso_audio.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proceso_audio.kill()
-            proceso_audio.wait()
-    proceso_audio = None
 
+    if proceso_audio is not None:
+        if proceso_audio.poll() is None:
+            print("⏹️ Deteniendo audio anterior...", flush=True)
+            proceso_audio.terminate()
 
-def comando_reproductor_audio(ruta):
-    return [REPRODUCTOR_AUDIO, "-q", "-D", AUDIO_DEVICE, str(ruta)]
+            try:
+                proceso_audio.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proceso_audio.kill()
+                proceso_audio.wait()
 
+        proceso_audio = None
 
 def reproducir_archivo_asincrono(ruta):
     global proceso_audio
+
     if not REPRODUCTOR_AUDIO:
-        print("❌ No se encontró aplay; instalá alsa-utils para reproducir los WAV.")
+        print("❌ No se encontró aplay.")
         return
+
     if not ruta.is_file():
-        print(f"❌ No existe el audio local del recordatorio: {ruta}")
+        print(f"❌ No existe el audio: {ruta}")
         return
 
     with audio_lock:
         detener_audio_actual()
-        proceso_audio = subprocess.Popen(
-            comando_reproductor_audio(ruta),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
 
+        print(f"🔊 Reproduciendo: {ruta}", flush=True)
+
+        proceso_audio = subprocess.Popen(
+            [
+                REPRODUCTOR_AUDIO,
+                "-D", DISPOSITIVO_AUDIO,
+                "-q",
+                str(ruta)
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE
+        )
 
 def preparar_audios_recordatorios(alertas):
     for alerta in alertas:
@@ -276,29 +323,58 @@ def registrar_confirmacion(cliente, medicamento):
         print(f"⚠️ Confirmación guardada localmente; no se pudo publicar: {error}")
 
 
-preparar_audios_recordatorios(lista_alertas)
 
 def reproducir_audio_asincrono(texto):
     global proceso_audio
+
     if not texto.strip():
         return
-    if not REPRODUCTOR_AUDIO:
-        print("❌ No se encontró aplay; instalá alsa-utils para reproducir los WAV.")
-        return
 
-    ruta_temporal = DIRECTORIO_AUDIO / "tts_dinamico.wav"
-    with audio_lock:
-        detener_audio_actual()
+    def tarea_audio():
+        global proceso_audio
+
         try:
-            generar_audio(texto, ruta_temporal)
-        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-            print(f"⚠️ No se pudo sintetizar con Piper: {error}")
-            return
-        proceso_audio = subprocess.Popen(
-            comando_reproductor_audio(ruta_temporal),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+            ruta = ruta_audio_recordatorio(texto)
+
+            with audio_lock:
+                detener_audio_actual()
+
+                # Si el audio ya existe, no usamos Piper nuevamente.
+                if not ruta.exists():
+                    print("🔊 Generando audio por primera vez...", flush=True)
+                    generar_audio(texto, ruta)
+                else:
+                    print("⚡ Usando audio guardado en caché...", flush=True)
+
+                print("🔊 Reproduciendo...", flush=True)
+
+                proceso_audio = subprocess.Popen(
+                    [
+                        REPRODUCTOR_AUDIO,
+                        "-D", DISPOSITIVO_AUDIO,
+                        "-q",
+                        str(ruta)
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE
+                )
+
+                _, error = proceso_audio.communicate(timeout=120)
+
+                if proceso_audio.returncode != 0:
+                    print(
+                        f"❌ Error ALSA: {error.decode(errors='replace')}",
+                        flush=True
+                    )
+                else:
+                    print("✅ Audio reproducido.", flush=True)
+
+                proceso_audio = None
+
+        except Exception as error:
+            print(f"❌ Error de audio: {error}", flush=True)
+
+    threading.Thread(target=tarea_audio, daemon=True).start()
 
 # --- 5. FUNCIONES DE BOTONES ---
 def enviar_confirmacion(cliente):
@@ -399,17 +475,37 @@ def on_message(client, userdata, msg):
             publicar_estado_receta(client, solicitud_id, False, str(error))
 
 # --- 7. INICIO MQTT ---
+
+# Cargar Piper una sola vez al iniciar el programa
+cargar_audio()
+
+print("DEBUG: Entrando en sección MQTT", flush=True)
+
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
 client.on_connect = on_connect
 client.on_message = on_message
 
-print("🔌 Conectando al broker MQTT...")
+print("🔌 Conectando al broker MQTT...", flush=True)
+
 try:
     client.connect(BROKER, PORT, 60)
-    client.loop_start()
-except Exception as e:
-    print("⚠️ Falló conexión al broker. Ejecutando offline.")
+    print("✅ Conexión inicial con el broker realizada.", flush=True)
 
+    client.loop_start()
+    print("✅ Cliente MQTT iniciado.", flush=True)
+
+except Exception as e:
+    print(f"❌ Error de conexión MQTT: {repr(e)}", flush=True)
+
+# Preparar audios en segundo plano para no bloquear MQTT
+print("🔊 Iniciando preparación de audios...", flush=True)
+
+hilo_audio = threading.Thread(
+    target=preparar_audios_recordatorios,
+    args=(lista_alertas,),
+    daemon=True
+)
+hilo_audio.start()
 # --- 8. LOOP PRINCIPAL ---
 try:
     ultimo_minuto_revisado = ""
